@@ -29,7 +29,7 @@ class CustomLinear(nn.Module):
     def forward(self, x: torch.Tensor):
         #
         # ret.shape = [C]
-        return x.mul(self.weight) # Changed
+        return x.mul(self.weight)
 
     def update(self, dw):
         with torch.no_grad():
@@ -104,7 +104,7 @@ class S1Net(nn.Module):
         self.node.append(IzhNodeMU(threshold=param_threshold, a=param_a, b=param_b, c=param_c, d=param_d, mem=param_mem, u=param_u, dt=param_dt))
         self.connection = connection
 
-    def forward(self, input, FR, C): 
+    def forward(self, input, FR, C, Fired, W_LatInh): 
         FR_W = torch.zeros(num_neuron, dtype=torch.float)
         if len(FR.shape) == 1:
             FR_W = FR*self.connection[0].weight
@@ -132,7 +132,15 @@ class S1Net(nn.Module):
                 n_Spike = self.node[0].spike          
                 Spike = Spike + n_Spike
             FR_n = Spike/Simulation_time
-        return FR_n, input_n
+
+        S = input_n
+        S = torch.where(input_n>= fire_threshold, 1, S)
+        S = torch.where(input_n< fire_threshold, 0, S)
+        if torch.sum(S) > 0:
+            Fired = Fired + 1; 
+            W_LatInh = torch.tanh(W_LatInh - 2 * torch.acos(S) * torch.exp(Fired) - 1) + 1
+
+        return FR_n, input_n, Fired, W_LatInh
 
     def reset(self):
         for i in range(len(self.node)):
@@ -145,7 +153,7 @@ class EBANet(nn.Module):
         self.node.append(IzhNodeMU(threshold=param_threshold, a=param_a, b=param_b, c=param_c, d=param_d, mem=param_mem, u=param_u, dt=param_dt))
         self.connection = connection
 
-    def forward(self, input, FR, C):   
+    def forward(self, input, FR, C, Fired, W_LatInh):  
         FR_W = torch.zeros(num_neuron, dtype=torch.float)
         if len(FR.shape) == 1:
             FR_W = FR*self.connection[0].weight
@@ -173,7 +181,15 @@ class EBANet(nn.Module):
                 n_Spike = self.node[0].spike          
                 Spike = Spike + n_Spike
             FR_n = Spike/Simulation_time
-        return FR_n, input_n
+        
+        S = input_n
+        S = torch.where(input_n>= fire_threshold, 1, S)
+        S = torch.where(input_n< fire_threshold, 0, S)
+        if torch.sum(S) > 0:
+            Fired = Fired + 1; 
+            W_LatInh = torch.tanh(W_LatInh - 2 * torch.acos(S) * torch.exp(Fired) - 1) + 1
+
+        return FR_n, input_n, Fired, W_LatInh
 
     def reset(self):
         for i in range(len(self.node)):
@@ -264,8 +280,8 @@ class AINet(nn.Module):
         for i in range(len(self.node)):
             self.node[i].n_reset()
 
-    def UpdateWeight(self, i, W):
-        self.connection[i].weight.data = self.connection[i].weight.data + W
+    def UpdateWeight(self, i, W, WIn):
+        self.connection[i].weight.data = self.connection[i].weight.data + W*WIn
 
 
 def DeltaWeight(Pre, Pre_n, Post, Post_n):
@@ -306,8 +322,8 @@ if __name__=="__main__":
     Simulation_time = 1000
     I_max = 1000
 
-    # When TrickID is set to 1, it means that the mapping relationship from input current 
-    # to firing rate is obtained directly by loading Izh.npy, 
+    # When the TrickID is set to 1, it means that the mapping relationship from input current 
+    # to firing rate is obtained directly by loading the Izh.npy, 
     # which can significantly reduce the program running time
     TrickID = 1 
     if TrickID == 1:
@@ -377,11 +393,8 @@ if __name__=="__main__":
     # EBA-AI
     con_matrix8 = torch.ones(num_AI, dtype=torch.float)*Init_Weight
     AI_connection.append(CustomLinear(con_matrix8))
-    AI = AINet(AI_connection)
+    AI = AINet(AI_connection)   
     
-    AI.connection[0].weight.data = torch.from_numpy(np.load('W_S1_AI.npy'))
-    AI.connection[2].weight.data = torch.from_numpy(np.load('W_EBA_AI.npy'))
-
     ##############################
     # Coding
     ##############################
@@ -396,14 +409,12 @@ if __name__=="__main__":
         for j in range(len(listJ)):
             x = float(listJ[j])
             y = math.exp(-(x-e)**2/(2*S**2))
-            Coding[i][j] = y 
+            Coding[i][j] = y
 
-    print(AI.connection[0].weight.data) # dW_S1AI
-    print(AI.connection[2].weight.data) # dW_EBAAI
-        
     ##############################
-    # Test
+    # Train
     ##############################
+    MoveNum = 25  
     Time = 300
     CT = 100
     Motion_Start = 1
@@ -417,89 +428,103 @@ if __name__=="__main__":
     CEBA = 0.04 
     CTPJ = 0.01 
     CAI = 0.15 
-    
-    Result_List = []
-    Veridical_hand = int((num_neuron-1)/2)
-    for Disparity in range(-JMax,JMax+1):
-        M1_input = torch.zeros(num_M1, dtype=torch.float)
-        V_input = torch.zeros(num_V, dtype=torch.float)
-        S1_input = torch.zeros(num_S1, dtype=torch.float)
-        TPJ_input = torch.zeros(num_TPJ, dtype=torch.float)
-        EBA_input = torch.zeros(num_EBA, dtype=torch.float)
-        AI_input = torch.zeros(num_AI, dtype=torch.float)
-        
-        FR_M1 = torch.zeros(num_M1, dtype=torch.float)
-        FR_V = torch.zeros(num_V, dtype=torch.float)
-        FR_S1 = torch.zeros(num_S1, dtype=torch.float)
-        FR_EBA = torch.zeros(num_EBA, dtype=torch.float)
-        FR_TPJ = torch.zeros(num_TPJ, dtype=torch.float)
-        FR_AI = torch.zeros(num_AI, dtype=torch.float)
 
-        FR_AI_List = torch.zeros([Time, num_AI], dtype=torch.float)
+    for k in range(num_neuron):
+        for i in range(MoveNum): 
+            print(i)        
+            M1_input = torch.zeros(num_M1, dtype=torch.float)
+            V_input = torch.zeros(num_V, dtype=torch.float)
+            S1_input = torch.zeros(num_S1, dtype=torch.float)
+            TPJ_input = torch.zeros(num_TPJ, dtype=torch.float)
+            EBA_input = torch.zeros(num_EBA, dtype=torch.float)
+            AI_input = torch.zeros(num_AI, dtype=torch.float)           
+            
+            FR_M1 = torch.zeros(num_M1, dtype=torch.float)
+            FR_V = torch.zeros(num_V, dtype=torch.float)
+            FR_S1 = torch.zeros( num_S1, dtype=torch.float)
+            FR_EBA = torch.zeros(num_EBA, dtype=torch.float)
+            FR_TPJ = torch.zeros(num_TPJ, dtype=torch.float)
+            FR_AI = torch.zeros( num_AI, dtype=torch.float)
 
-        
-        with torch.no_grad():
-            for t in range(1,Time+1):
-                S_M1 = torch.zeros(num_M1, dtype=torch.float)
-                S_V = torch.zeros(num_V, dtype=torch.float)
+            dW_S1TPJ = torch.zeros(num_M1, dtype=torch.float)
+            dW_EBATPJ = torch.zeros(num_M1, dtype=torch.float)
+            dW_S1AI = torch.zeros(num_M1, dtype=torch.float)
+            dW_EBAAI = torch.zeros(num_M1, dtype=torch.float)
 
-                if t>=Motion_Start and t<=Motion_End:
-                    S_M1 = Coding[Veridical_hand]
-                    M1_input = (1-(1-CM1)**t)*S_M1
-                else:
-                    M1_input = S_M1 
-                
+            fire_threshold = 0.7
+            W_LatInh_Init = torch.ones(num_neuron, dtype=torch.float)*Init_Weight
+            W_LatInh_S1_AI = W_LatInh_Init
+            W_LatInh_EBA_AI = W_LatInh_Init
+            Fired_S1 = torch.zeros(num_S1, dtype=torch.float)
+            Fired_EBA = torch.zeros(num_EBA, dtype=torch.float)
+            
+            with torch.no_grad():
+                for t in range(1,Time+1):
+                    S_M1 = torch.zeros(num_M1, dtype=torch.float)
+                    S_V = torch.zeros(num_V, dtype=torch.float)
+
+                    if t>=Motion_Start and t<=Motion_End:
+                        S_M1 = Coding[k]
+                        M1_input = (1-(1-CM1)**t)*S_M1 
+                    else:
+                        M1_input = S_M1
                     
-                if t>=Vision_Start and t<=Vision_End:
-                    S_V = Coding[Veridical_hand+Disparity]
-                    V_input = (1-(1-CV)**(t-CT))*S_V
-                else:
-                    V_input = S_V
+                        
+                    if t>=Vision_Start and t<=Vision_End:
+                        S_V = Coding[k]
+                        V_input = (1-(1-CV)**(t-CT))*S_V 
+                    else:
+                        V_input = S_V
 
-                FR_M1_n = M1(M1_input)
+                    FR_M1_n = M1(M1_input)
+                    
+                    FR_V_n = V(V_input)       
+                                
+                    [FR_S1_n, S1_input_n, Fired_S1, W_LatInh_S1_AI] = S1(S1_input, FR_M1_n, CS1, Fired_S1, W_LatInh_S1_AI)
 
-                FR_V_n = V(V_input)       
+                    [FR_EBA_n, EBA_input_n, Fired_EBA, W_LatInh_EBA_AI] =  EBA(EBA_input, FR_V_n, CEBA, Fired_EBA, W_LatInh_EBA_AI)
 
-                [FR_S1_n, S1_input_n] = S1(S1_input, FR_M1_n, CS1)
+                    FR_Input_TPJ_n = torch.stack((FR_S1_n, FR_EBA_n), 0)
+                    [FR_TPJ_n, TPJ_input_n] = TPJ(TPJ_input, FR_Input_TPJ_n, CTPJ)
+                    
+                    FR_Input_AI = torch.stack((FR_S1_n, FR_TPJ_n, FR_EBA_n), 0)
+                    [FR_AI_n, AI_input_n] = AI(AI_input, FR_Input_AI, CAI)
 
-                [FR_EBA_n, EBA_input_n] = EBA(EBA_input, FR_V_n, CEBA)
+                    # Update weights
+                    # S1-AI
+                    ddW_S1AI = DeltaWeight(FR_S1, FR_S1_n, FR_AI, FR_AI_n)
+                    dW_S1AI = dW_S1AI + ddW_S1AI
+                    # EBA-AI
+                    ddW_EBAAI = DeltaWeight(FR_EBA, FR_EBA_n, FR_AI, FR_AI_n)
+                    dW_EBAAI = dW_EBAAI + ddW_EBAAI
 
-                FR_Input_TPJ_n = torch.stack((FR_S1_n, FR_EBA_n), 0)
-                [FR_TPJ_n, TPJ_input_n] = TPJ(TPJ_input, FR_Input_TPJ_n, CTPJ)
-                
-                FR_Input_AI = torch.stack((FR_S1_n, FR_TPJ_n, FR_EBA_n), 0)
-                [FR_AI_n, AI_input_n] = AI(AI_input, FR_Input_AI, CAI)
+                    FR_M1 = FR_M1_n
+                    FR_V = FR_V_n
+                    FR_S1 = FR_S1_n
+                    FR_EBA = FR_EBA_n
+                    FR_TPJ = FR_TPJ_n
+                    FR_AI = FR_AI_n
+                    
 
-                FR_AI_List[t-1] = FR_AI_n
+                    S1_input = S1_input_n
+                    TPJ_input = TPJ_input_n
+                    EBA_input = EBA_input_n
+                    AI_input = AI_input_n
 
-                FR_M1 = FR_M1_n
-                FR_V = FR_V_n
-                FR_S1 = FR_S1_n
-                FR_EBA = FR_EBA_n
-                FR_TPJ = FR_TPJ_n
-                FR_AI = FR_AI_n
-                
-                S1_input = S1_input_n
-                TPJ_input = TPJ_input_n
-                EBA_input = EBA_input_n
-                AI_input = AI_input_n
+            AI.UpdateWeight(0, dW_S1AI, W_LatInh_S1_AI)
+            AI.UpdateWeight(2, dW_EBAAI, W_LatInh_EBA_AI)
+            
+            print(AI.connection[0].weight.data) # dW_S1AI
+            print(AI.connection[2].weight.data) # dW_EBAAI
+            
+            M1.reset()
+            V.reset()
+            S1.reset()
+            EBA.reset()
+            TPJ.reset()
+            AI.reset()                
+            
+    np.save('W_S1_AI.npy', AI.connection[0].weight.data)
+    np.save('W_EBA_AI.npy', AI.connection[2].weight.data)
 
-            print('Test Time End')
-            Estimated_hand = torch.max(torch.max(FR_AI_List, 0)[0],0)[1].item()
-            Proprioceptive_drift = Estimated_hand - Veridical_hand
-            R = [Disparity, Proprioceptive_drift]            
-            Result_List.append(R)
-
-            print(R)
-            print(torch.max(FR_AI_List, 0)[0])
-            print("----------------------------") 
-    
-    print(Result_List)
-
-    X = [x[0] for x in Result_List]
-    Y = [x[1] for x in Result_List]
-    S = np.polyfit(X,Y,3)
-    xn = np.linspace(-(num_neuron-1)/2, (num_neuron-1)/2, 1000)
-    yn = np.poly1d(S)
-    plt.plot(xn, yn(xn), X, Y, 'o')
-    plt.show()
+    print('Training End')
